@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -28,9 +29,9 @@ BASE_CANDIDATES = (
     [API_BASE]
     if API_BASE
     else [
+        "https://poe2scout.com/api",
         "https://api.poe2scout.com/api",
         "https://api.poe2scout.com",
-        "https://poe2scout.com/api",
     ]
 )
 USER_AGENT = os.environ.get(
@@ -199,20 +200,22 @@ def resolve_league(base, realm):
     return league
 
 
-def fetch_category(base, realm, league_name, category):
-    safe = re.sub(r"[^a-z0-9]+", "_", f"{realm}_{league_name}_{category}".lower())
-    cached = cache_read(f"cur_{safe}.json")
-    if cached is not None:
-        return cached
+def league_tokens(league):
+    """Candidate path segments for {LeagueName}; the API uses the short slug
+    (e.g. "runes"), exposed as ShortName, but fall back to Value just in case."""
+    toks = []
+    for k in ("shortName", "value", "leagueId", "id"):
+        v = g(league, k)
+        if v and str(v) not in toks:
+            toks.append(str(v))
+    return toks or ["Standard"]
 
-    base = (
-        f"{base}/{urllib.parse.quote(realm)}"
-        f"/Leagues/{urllib.parse.quote(league_name)}/Currencies/ByCategory"
-    )
+
+def _fetch_pages(url_base, category):
     items, page, max_pages = [], 1, 8
     while page <= max_pages:
         params = {"Category": category, "Page": str(page), "PerPage": "250"}
-        data = http_json(f"{base}?{urllib.parse.urlencode(params)}")
+        data = http_json(f"{url_base}?{urllib.parse.urlencode(params)}")
         chunk = g(data, "items", default=[]) if isinstance(data, dict) else data
         if not isinstance(chunk, list):
             chunk = []
@@ -221,9 +224,43 @@ def fetch_category(base, realm, league_name, category):
         if page >= pages or not chunk:
             break
         page += 1
-
-    cache_write(f"cur_{safe}.json", items)
     return items
+
+
+def fetch_category(base, realm, league, category):
+    realm_key = re.sub(r"[^a-z0-9]+", "_", realm.lower())
+    tokens = league_tokens(league)
+
+    # Prefer a previously confirmed league path token.
+    saved = cache_read(f"ltoken_{realm_key}.json")
+    if saved and saved in tokens:
+        tokens = [saved] + [t for t in tokens if t != saved]
+
+    safe = re.sub(r"[^a-z0-9]+", "_", f"{realm}_{tokens[0]}_{category}".lower())
+    cached = cache_read(f"cur_{safe}.json")
+    if cached is not None:
+        return cached
+
+    last_err = None
+    for tok in tokens:
+        url_base = (
+            f"{base}/{urllib.parse.quote(realm)}"
+            f"/Leagues/{urllib.parse.quote(tok)}/Currencies/ByCategory"
+        )
+        try:
+            items = _fetch_pages(url_base, category)
+            cache_write(f"ltoken_{realm_key}.json", tok)
+            cache_write(f"cur_{re.sub(r'[^a-z0-9]+', '_', f'{realm}_{tok}_{category}'.lower())}.json", items)
+            return items
+        except urllib.error.HTTPError as exc:
+            last_err = exc
+            if exc.code == 404:
+                continue  # wrong league token, try the next candidate
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            continue
+    raise last_err or RuntimeError("No working league path token")
 
 
 # ---------------------------------------------------------------------------
@@ -285,14 +322,14 @@ def main():
         error_item("Couldn't reach poe2scout API", str(exc)[:240])
         return
 
-    league_name = g(league, "value", default="")
+    league_name = g(league, "value", "shortName", default="")
     base_label = g(league, "baseCurrencyText", default="Exalted Orb")
     league_divine = to_float(g(league, "divinePrice"))
 
     try:
-        items = fetch_category(base, realm, league_name, category)
+        items = fetch_category(base, realm, league, category)
     except Exception as exc:  # noqa: BLE001
-        error_item(f"Couldn't load '{category}' prices", str(exc))
+        error_item(f"Couldn't load '{category}' prices", str(exc)[:240])
         return
 
     if not items:
