@@ -32,7 +32,6 @@ USER_AGENT = os.environ.get(
     "USER_AGENT",
     "AlfredWorkflow-poe2-currency (https://github.com/cwagdev/AlfredWorkflows)",
 )
-DEFAULT_CATEGORY = os.environ.get("CATEGORY", "currency").strip() or "currency"
 LEAGUE_OVERRIDE = os.environ.get("LEAGUE", "").strip()
 CACHE_TTL = int(os.environ.get("CACHE_TTL", "600"))  # seconds
 HTTP_TIMEOUT = 12
@@ -318,13 +317,11 @@ def main():
     raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
 
     # @category narrows to one category; otherwise search across all currency
-    # categories (or honour a CATEGORY env override).
+    # categories (orbs, omens, essences, …).
     explicit_category = None
     m = re.match(r"^@(\S+)\s*(.*)$", raw)
     if m:
         explicit_category, raw = m.group(1), m.group(2).strip()
-    elif os.environ.get("CATEGORY", "").strip():
-        explicit_category = DEFAULT_CATEGORY
 
     ref_term = None
     parts = re.split(r"\s+in\s+", raw, maxsplit=1)

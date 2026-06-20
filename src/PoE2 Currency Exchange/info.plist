@@ -60,7 +60,7 @@
 				<key>runningsubtext</key>
 				<string>Fetching prices from poe2scout.com…</string>
 				<key>script</key>
-				<string>/usr/bin/python3 currency.py "{query}"</string>
+				<string>/usr/bin/python3 currency.py "$1"</string>
 				<key>scriptargtype</key>
 				<integer>1</integer>
 				<key>scriptfile</key>
@@ -128,9 +128,8 @@ instant. The current league is detected automatically.
 
 Configuration (Workflow Environment Variables)
 ----------------------------------------------
-  REALM      Game realm path segment (default: auto-detect "poe2")
-  LEAGUE     Force a specific league name (default: auto-detect current)
-  CATEGORY   Restrict search to one category (default: all currency categories)
+  REALM      Game realm path segment (default: poe2)
+  LEAGUE     Force a specific league name/slug (default: auto-detect current)
   API_BASE   API base URL (default: https://poe2scout.com/api)
   CACHE_TTL  Seconds to cache price data (default: 600)
   USER_AGENT Custom User-Agent for API requests
@@ -160,8 +159,6 @@ Data: https://poe2scout.com  •  API: https://poe2scout.com/api/swagger</string
 		<string>https://poe2scout.com/api</string>
 		<key>CACHE_TTL</key>
 		<string>600</string>
-		<key>CATEGORY</key>
-		<string></string>
 		<key>LEAGUE</key>
 		<string></string>
 		<key>REALM</key>
