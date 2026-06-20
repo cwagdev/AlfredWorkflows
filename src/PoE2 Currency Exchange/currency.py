@@ -23,7 +23,16 @@ import time
 import urllib.parse
 import urllib.request
 
-API_BASE = os.environ.get("API_BASE", "https://poe2scout.com/api").rstrip("/")
+API_BASE = os.environ.get("API_BASE", "").strip().rstrip("/")
+BASE_CANDIDATES = (
+    [API_BASE]
+    if API_BASE
+    else [
+        "https://api.poe2scout.com/api",
+        "https://api.poe2scout.com",
+        "https://poe2scout.com/api",
+    ]
+)
 USER_AGENT = os.environ.get(
     "USER_AGENT",
     "AlfredWorkflow-poe2-currency (https://github.com/cwagdev/AlfredWorkflows)",
@@ -76,6 +85,30 @@ def http_json(url):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def api_context():
+    """Return (base_url, realms_list), auto-detecting the working API base."""
+    cached = cache_read("base.json")
+    if cached:
+        try:
+            realms = http_json(f"{cached}/Realms")
+            if isinstance(realms, list) and realms:
+                return cached, realms
+        except Exception:  # noqa: BLE001 - fall through to re-probe
+            pass
+
+    errors = []
+    for base in BASE_CANDIDATES:
+        try:
+            realms = http_json(f"{base}/Realms")
+            if isinstance(realms, list) and realms:
+                cache_write("base.json", base)
+                return base, realms
+            errors.append(f"{base}/Realms -> unexpected payload")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{base}/Realms -> {exc}")
+    raise RuntimeError("; ".join(errors))
+
+
 def g(d, *keys, default=None):
     """Case-insensitive lookup tolerant of PascalCase/camelCase/snake_case."""
     if not isinstance(d, dict):
@@ -125,35 +158,25 @@ def error_item(title, subtitle=""):
 # ---------------------------------------------------------------------------
 # data access  (real poe2scout API shape)
 # ---------------------------------------------------------------------------
-def resolve_realm():
+def resolve_realm(realms):
     if REALM_OVERRIDE:
         return REALM_OVERRIDE
-    cached = cache_read("realm.json")
-    if cached:
-        return cached
-    realms = http_json(f"{API_BASE}/Realms")
-    if not isinstance(realms, list) or not realms:
-        raise RuntimeError("Unexpected /Realms response")
 
     def is_poe2(r):
-        blob = " ".join(
-            str(g(r, "value", "realm_api_id", "game_api_id", "label", default="")) for _ in [0]
-        ).lower()
+        blob = str(g(r, "value", "realm_api_id", "game_api_id", "label", default="")).lower()
         return "poe2" in blob or "poe 2" in blob
 
     chosen = next((r for r in realms if is_poe2(r)), realms[0])
-    realm = g(chosen, "value", "realm_api_id", default="poe2")
-    cache_write("realm.json", realm)
-    return realm
+    return g(chosen, "value", "realm_api_id", default="poe2")
 
 
-def resolve_league(realm):
+def resolve_league(base, realm):
     cache_key = f"league_{re.sub(r'[^a-z0-9]+', '_', realm.lower())}.json"
     cached = cache_read(cache_key)
     if cached:
         return cached
 
-    leagues = http_json(f"{API_BASE}/{urllib.parse.quote(realm)}/Leagues")
+    leagues = http_json(f"{base}/{urllib.parse.quote(realm)}/Leagues")
     if not isinstance(leagues, list) or not leagues:
         raise RuntimeError("Unexpected /Leagues response")
 
@@ -176,14 +199,14 @@ def resolve_league(realm):
     return league
 
 
-def fetch_category(realm, league_name, category):
+def fetch_category(base, realm, league_name, category):
     safe = re.sub(r"[^a-z0-9]+", "_", f"{realm}_{league_name}_{category}".lower())
     cached = cache_read(f"cur_{safe}.json")
     if cached is not None:
         return cached
 
     base = (
-        f"{API_BASE}/{urllib.parse.quote(realm)}"
+        f"{base}/{urllib.parse.quote(realm)}"
         f"/Leagues/{urllib.parse.quote(league_name)}/Currencies/ByCategory"
     )
     items, page, max_pages = [], 1, 8
@@ -255,10 +278,11 @@ def main():
         ref_term = parts[1].strip()
 
     try:
-        realm = resolve_realm()
-        league = resolve_league(realm)
+        base, realms = api_context()
+        realm = resolve_realm(realms)
+        league = resolve_league(base, realm)
     except Exception as exc:  # noqa: BLE001
-        error_item("Couldn't load the current league", f"{exc} — check your connection")
+        error_item("Couldn't reach poe2scout API", str(exc)[:240])
         return
 
     league_name = g(league, "value", default="")
@@ -266,7 +290,7 @@ def main():
     league_divine = to_float(g(league, "divinePrice"))
 
     try:
-        items = fetch_category(realm, league_name, category)
+        items = fetch_category(base, realm, league_name, category)
     except Exception as exc:  # noqa: BLE001
         error_item(f"Couldn't load '{category}' prices", str(exc))
         return
