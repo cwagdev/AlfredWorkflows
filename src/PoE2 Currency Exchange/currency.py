@@ -2,15 +2,17 @@
 """Alfred Script Filter: PoE2 currency exchange lookup via poe2scout.com.
 
 Usage from Alfred (keyword `poe2`):
-    poe2 divine                -> price of Divine Orb (in Exalted, with Divine ref)
-    poe2 mirror in divine      -> Mirror priced in Divine Orbs
+    poe2 divine                -> price of Divine Orb (in the base currency)
+    poe2 mirror in divine      -> Mirror of Kalandra priced in Divine Orbs
     poe2 chaos in exalt        -> Chaos priced in Exalted
-    poe2 @fragments breach     -> search the "fragments" category instead
+    poe2 @fragments breach     -> search a different currency category
 
-All currency `currentPrice` values returned by poe2scout are denominated in the
-league's base currency (Exalted Orb), so an exchange rate between any two items
-A and B is simply price(A) / price(B). We fetch the whole category once, cache it
-for a few minutes, then filter / convert locally so typing stays instant.
+Every currency `CurrentPrice` from poe2scout is denominated in the league base
+currency (Exalted Orb), so the exchange rate between any two items A and B is
+just price(A) / price(B). We fetch the whole category once, cache it for a few
+minutes, then filter / convert locally so typing stays instant.
+
+API reference: https://poe2scout.com/api/swagger  (OpenAPI servers base: /api)
 """
 
 import json
@@ -27,6 +29,7 @@ USER_AGENT = os.environ.get(
     "AlfredWorkflow-poe2-currency (https://github.com/cwagdev/AlfredWorkflows)",
 )
 DEFAULT_CATEGORY = os.environ.get("CATEGORY", "currency").strip() or "currency"
+REALM_OVERRIDE = os.environ.get("REALM", "").strip()
 LEAGUE_OVERRIDE = os.environ.get("LEAGUE", "").strip()
 CACHE_TTL = int(os.environ.get("CACHE_TTL", "600"))  # seconds
 HTTP_TIMEOUT = 12
@@ -66,27 +69,36 @@ def cache_write(name, data):
 
 
 def http_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    req = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
+    )
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def g(d, *keys, default=None):
-    """Get the first present key (handles camelCase / snake_case drift)."""
-    if isinstance(d, dict):
-        for k in keys:
-            if k in d and d[k] is not None:
-                return d[k]
+    """Case-insensitive lookup tolerant of PascalCase/camelCase/snake_case."""
+    if not isinstance(d, dict):
+        return default
+    lower = {k.lower(): v for k, v in d.items()}
+    for k in keys:
+        v = lower.get(k.lower())
+        if v is not None:
+            return v
     return default
 
 
+def to_float(v):
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def fmt(n):
+    n = to_float(n)
     if n is None:
         return "?"
-    try:
-        n = float(n)
-    except (TypeError, ValueError):
-        return str(n)
     if n == 0:
         return "0"
     a = abs(n)
@@ -101,11 +113,8 @@ def fmt(n):
     return f"{n:.5f}".rstrip("0").rstrip(".")
 
 
-def alfred(items, rerun=None):
-    out = {"items": items}
-    if rerun:
-        out["rerun"] = rerun
-    sys.stdout.write(json.dumps(out))
+def alfred(items):
+    sys.stdout.write(json.dumps({"items": items}))
 
 
 def error_item(title, subtitle=""):
@@ -114,60 +123,78 @@ def error_item(title, subtitle=""):
 
 
 # ---------------------------------------------------------------------------
-# data access
+# data access  (real poe2scout API shape)
 # ---------------------------------------------------------------------------
-def resolve_league():
-    if LEAGUE_OVERRIDE:
-        return LEAGUE_OVERRIDE
-    cached = cache_read("league.json")
+def resolve_realm():
+    if REALM_OVERRIDE:
+        return REALM_OVERRIDE
+    cached = cache_read("realm.json")
     if cached:
         return cached
-    leagues = http_json(f"{API_BASE}/leagues")
-    if isinstance(leagues, dict):  # some shapes wrap the list
-        leagues = g(leagues, "leagues", "items", "data", default=leagues)
+    realms = http_json(f"{API_BASE}/Realms")
+    if not isinstance(realms, list) or not realms:
+        raise RuntimeError("Unexpected /Realms response")
+
+    def is_poe2(r):
+        blob = " ".join(
+            str(g(r, "value", "realm_api_id", "game_api_id", "label", default="")) for _ in [0]
+        ).lower()
+        return "poe2" in blob or "poe 2" in blob
+
+    chosen = next((r for r in realms if is_poe2(r)), realms[0])
+    realm = g(chosen, "value", "realm_api_id", default="poe2")
+    cache_write("realm.json", realm)
+    return realm
+
+
+def resolve_league(realm):
+    cache_key = f"league_{re.sub(r'[^a-z0-9]+', '_', realm.lower())}.json"
+    cached = cache_read(cache_key)
+    if cached:
+        return cached
+
+    leagues = http_json(f"{API_BASE}/{urllib.parse.quote(realm)}/Leagues")
     if not isinstance(leagues, list) or not leagues:
-        raise RuntimeError("Unexpected /leagues response")
+        raise RuntimeError("Unexpected /Leagues response")
 
-    def name_of(lg):
-        return g(lg, "value", "name", "id", "leagueId", default="")
-
-    # Prefer an explicit "current" flag.
-    current = [lg for lg in leagues if g(lg, "isCurrent", "is_current", "current")]
-    if current:
-        league = name_of(current[0])
+    if LEAGUE_OVERRIDE:
+        league = next(
+            (lg for lg in leagues if str(g(lg, "value", "Value", default="")).lower() == LEAGUE_OVERRIDE.lower()),
+            {"Value": LEAGUE_OVERRIDE},
+        )
     else:
-        # Otherwise the first temp league that isn't a permanent one.
-        perm = {"standard", "hardcore", "ssf standard", "ssf hardcore"}
-        temp = [lg for lg in leagues if name_of(lg).lower() not in perm]
-        league = name_of((temp or leagues)[0])
-    if not league:
+        league = next((lg for lg in leagues if g(lg, "isCurrent")), None)
+        if league is None:
+            perm = {"standard", "hardcore", "ssf standard", "ssf hardcore"}
+            league = next(
+                (lg for lg in leagues if str(g(lg, "value", default="")).lower() not in perm),
+                leagues[0],
+            )
+    if not g(league, "value"):
         raise RuntimeError("Could not determine current league")
-    cache_write("league.json", league)
+    cache_write(cache_key, league)
     return league
 
 
-def fetch_category(league, category):
-    safe = re.sub(r"[^a-z0-9]+", "_", f"{league}_{category}".lower())
+def fetch_category(realm, league_name, category):
+    safe = re.sub(r"[^a-z0-9]+", "_", f"{realm}_{league_name}_{category}".lower())
     cached = cache_read(f"cur_{safe}.json")
     if cached is not None:
         return cached
 
+    base = (
+        f"{API_BASE}/{urllib.parse.quote(realm)}"
+        f"/Leagues/{urllib.parse.quote(league_name)}/Currencies/ByCategory"
+    )
     items, page, max_pages = [], 1, 8
     while page <= max_pages:
-        params = {"page": str(page), "perPage": "200"}
-        if league:
-            params["league"] = league
-        url = f"{API_BASE}/items/currency/{urllib.parse.quote(category)}?{urllib.parse.urlencode(params)}"
-        data = http_json(url)
-        chunk = data.get("items") if isinstance(data, dict) else data
+        params = {"Category": category, "Page": str(page), "PerPage": "250"}
+        data = http_json(f"{base}?{urllib.parse.urlencode(params)}")
+        chunk = g(data, "items", default=[]) if isinstance(data, dict) else data
         if not isinstance(chunk, list):
             chunk = []
         items.extend(chunk)
-        pages = g(data, "pages", "totalPages", default=1) if isinstance(data, dict) else 1
-        try:
-            pages = int(pages)
-        except (TypeError, ValueError):
-            pages = 1
+        pages = to_float(g(data, "pages", default=1)) or 1
         if page >= pages or not chunk:
             break
         page += 1
@@ -180,21 +207,17 @@ def fetch_category(league, category):
 # matching / conversion
 # ---------------------------------------------------------------------------
 def name_of_item(it):
-    return g(it, "text", "currencyTypeName", "name", "apiId", "api_id", default="")
+    return g(it, "text", "name", "apiId", default="")
 
 
 def price_of(it):
-    p = g(it, "currentPrice", "current_price", "chaosEquivalent", "price")
-    try:
-        return float(p) if p is not None else None
-    except (TypeError, ValueError):
-        return None
+    return to_float(g(it, "currentPrice"))
 
 
 def rank(it, term):
-    """Lower is better."""
+    """Lower is better; 9 means no match."""
     name = name_of_item(it).lower()
-    api = str(g(it, "apiId", "api_id", default="")).lower()
+    api = str(g(it, "apiId", default="")).lower()
     t = term.lower()
     if not t:
         return 5
@@ -204,7 +227,6 @@ def rank(it, term):
         return 1
     if t in name or t in api:
         return 2
-    # token subset match
     if all(tok in name for tok in t.split()):
         return 3
     return 9
@@ -233,76 +255,83 @@ def main():
         ref_term = parts[1].strip()
 
     try:
-        league = resolve_league()
+        realm = resolve_realm()
+        league = resolve_league(realm)
     except Exception as exc:  # noqa: BLE001
         error_item("Couldn't load the current league", f"{exc} — check your connection")
         return
 
+    league_name = g(league, "value", default="")
+    base_label = g(league, "baseCurrencyText", default="Exalted Orb")
+    league_divine = to_float(g(league, "divinePrice"))
+
     try:
-        items = fetch_category(league, category)
+        items = fetch_category(realm, league_name, category)
     except Exception as exc:  # noqa: BLE001
         error_item(f"Couldn't load '{category}' prices", str(exc))
         return
 
     if not items:
-        error_item(f"No items found in category '{category}'", f"League: {league}")
+        error_item(f"No items found in category '{category}'", f"League: {league_name}")
         return
 
-    # Reference currency for conversion (default = base = Exalted).
-    ref_price, ref_label = 1.0, "Exalted Orb"
+    # Reference currency for conversion (default = base currency).
+    ref_price, ref_label = 1.0, base_label
     if ref_term:
         ref_item = find_best(items, ref_term)
         if ref_item and price_of(ref_item):
             ref_price = price_of(ref_item)
             ref_label = name_of_item(ref_item)
         else:
-            ref_label = "Exalted Orb (couldn't match '%s')" % ref_term
+            ref_label = f"{base_label} (couldn't match '{ref_term}')"
 
-    # Helper to also show a Divine equivalent in the default view.
-    divine = next(
-        (it for it in items if str(g(it, "apiId", "api_id", default="")).lower() in ("divine", "divine-orb")
-         or name_of_item(it).lower() == "divine orb"),
-        None,
-    )
-    divine_price = price_of(divine) if divine else None
+    # Divine equivalent for the default view (prefer the league's DivinePrice).
+    divine_price = league_divine
+    if not divine_price:
+        dv = next(
+            (it for it in items if str(g(it, "apiId", default="")).lower() in ("divine", "divine-orb")
+             or name_of_item(it).lower() == "divine orb"),
+            None,
+        )
+        divine_price = price_of(dv) if dv else None
 
-    # Select & rank the items to display.
     matched = [it for it in items if (not search or rank(it, search) < 9) and price_of(it) is not None]
     matched.sort(key=lambda it: (rank(it, search), -(price_of(it) or 0)))
-    matched = matched[:25] if search else matched[:25]
+    matched = matched[:25]
 
     if not matched:
-        error_item(f"No match for '{search}'", f"Category: {category} · League: {league}")
+        error_item(f"No match for '{search}'", f"Category: {category} · League: {league_name}")
         return
 
+    ref_short = ref_label.split(" (")[0]
     results = []
     for it in matched:
         name = name_of_item(it)
-        exalted = price_of(it)
-        converted = exalted / ref_price if ref_price else exalted
+        base_price = price_of(it)
+        converted = base_price / ref_price if ref_price else base_price
         arg = f"{converted:.6f}".rstrip("0").rstrip(".")
 
         if ref_term:
-            sub = f"1 {name} = {fmt(converted)} {ref_label}   •   {league}"
+            sub = f"1 {name} = {fmt(converted)} {ref_label}   •   {league_name}"
             large = f"1 {name} = {fmt(converted)} {ref_label}"
         else:
             extra = ""
             if divine_price and divine_price > 0 and name.lower() != "divine orb":
-                extra = f"   ({fmt(exalted / divine_price)} Divine)"
-            sub = f"1 {name} = {fmt(exalted)} Exalted{extra}   •   {league}"
-            large = f"1 {name}\n  = {fmt(exalted)} Exalted" + (f"\n  = {fmt(exalted / divine_price)} Divine" if divine_price else "")
+                extra = f"   ({fmt(base_price / divine_price)} Divine)"
+            sub = f"1 {name} = {fmt(base_price)} {base_label}{extra}   •   {league_name}"
+            large = f"1 {name}\n  = {fmt(base_price)} {base_label}" + (
+                f"\n  = {fmt(base_price / divine_price)} Divine" if divine_price else ""
+            )
 
         results.append({
-            "uid": str(g(it, "apiId", "api_id", default=name)),
-            "title": f"{name} — {fmt(converted)} {ref_label.split(' (')[0] if ref_term else 'Exalted'}",
+            "uid": str(g(it, "apiId", default=name)),
+            "title": f"{name} — {fmt(converted)} {ref_short}",
             "subtitle": sub,
             "arg": arg,
             "valid": True,
             "icon": {"path": "icon.png"},
             "text": {"copy": arg, "largetype": large},
-            "mods": {
-                "cmd": {"valid": True, "arg": name, "subtitle": f"Copy name: {name}"},
-            },
+            "mods": {"cmd": {"valid": True, "arg": name, "subtitle": f"Copy name: {name}"}},
         })
 
     alfred(results)
