@@ -12,7 +12,9 @@ currency (Exalted Orb), so the exchange rate between any two items A and B is
 just price(A) / price(B). We fetch the whole category once, cache it for a few
 minutes, then filter / convert locally so typing stays instant.
 
-API reference: https://poe2scout.com/api/swagger  (OpenAPI servers base: /api)
+API: https://poe2scout.com/api/swagger
+  GET /{Realm}/Leagues/                                  -> leagues (current league)
+  GET /{Realm}/Leagues/{LeagueName}/Currencies/ByCategory -> currency prices
 """
 
 import json
@@ -24,30 +26,57 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-API_BASE = os.environ.get("API_BASE", "").strip().rstrip("/")
-BASE_CANDIDATES = (
-    [API_BASE]
-    if API_BASE
-    else [
-        "https://poe2scout.com/api",
-        "https://api.poe2scout.com/api",
-        "https://api.poe2scout.com",
-    ]
-)
+BASE = os.environ.get("API_BASE", "https://poe2scout.com/api").strip().rstrip("/")
+REALM = os.environ.get("REALM", "poe2").strip() or "poe2"
 USER_AGENT = os.environ.get(
     "USER_AGENT",
     "AlfredWorkflow-poe2-currency (https://github.com/cwagdev/AlfredWorkflows)",
 )
 DEFAULT_CATEGORY = os.environ.get("CATEGORY", "currency").strip() or "currency"
-REALM_OVERRIDE = os.environ.get("REALM", "").strip()
 LEAGUE_OVERRIDE = os.environ.get("LEAGUE", "").strip()
 CACHE_TTL = int(os.environ.get("CACHE_TTL", "600"))  # seconds
 HTTP_TIMEOUT = 12
 
 
 # ---------------------------------------------------------------------------
-# small helpers
+# http + cache
 # ---------------------------------------------------------------------------
+class ApiError(RuntimeError):
+    def __init__(self, url, status=None, reason=None):
+        self.url, self.status = url, status
+        super().__init__(f"HTTP {status} for {url}" if status else f"{reason} for {url}")
+
+
+def _read(url):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def http_json(url):
+    """GET + parse JSON. poe2scout's collection routes are slash-sensitive
+    behind the proxy, so on a 404/405 we retry once with the trailing slash
+    toggled. Errors carry the URL + status for easy debugging."""
+    parts = urllib.parse.urlsplit(url)
+    flipped = parts.path[:-1] if parts.path.endswith("/") else parts.path + "/"
+    variants = [url, urllib.parse.urlunsplit(parts._replace(path=flipped))]
+
+    last = None
+    for u in variants:
+        try:
+            return _read(u)
+        except urllib.error.HTTPError as exc:
+            last = ApiError(u, status=exc.code)
+            if exc.code in (404, 405):
+                continue
+            raise last
+        except urllib.error.URLError as exc:
+            raise ApiError(u, reason=getattr(exc, "reason", exc))
+    raise last
+
+
 def cache_dir():
     d = os.environ.get("alfred_workflow_cache") or os.path.join(
         os.path.expanduser("~"), ".cache", "poe2-currency"
@@ -78,38 +107,9 @@ def cache_write(name, data):
         pass
 
 
-def http_json(url):
-    req = urllib.request.Request(
-        url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def api_context():
-    """Return (base_url, realms_list), auto-detecting the working API base."""
-    cached = cache_read("base.json")
-    if cached:
-        try:
-            realms = http_json(f"{cached}/Realms")
-            if isinstance(realms, list) and realms:
-                return cached, realms
-        except Exception:  # noqa: BLE001 - fall through to re-probe
-            pass
-
-    errors = []
-    for base in BASE_CANDIDATES:
-        try:
-            realms = http_json(f"{base}/Realms")
-            if isinstance(realms, list) and realms:
-                cache_write("base.json", base)
-                return base, realms
-            errors.append(f"{base}/Realms -> unexpected payload")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{base}/Realms -> {exc}")
-    raise RuntimeError("; ".join(errors))
-
-
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
 def g(d, *keys, default=None):
     """Case-insensitive lookup tolerant of PascalCase/camelCase/snake_case."""
     if not isinstance(d, dict):
@@ -157,34 +157,24 @@ def error_item(title, subtitle=""):
 
 
 # ---------------------------------------------------------------------------
-# data access  (real poe2scout API shape)
+# poe2scout data access
 # ---------------------------------------------------------------------------
-def resolve_realm(realms):
-    if REALM_OVERRIDE:
-        return REALM_OVERRIDE
-
-    def is_poe2(r):
-        blob = str(g(r, "value", "realm_api_id", "game_api_id", "label", default="")).lower()
-        return "poe2" in blob or "poe 2" in blob
-
-    chosen = next((r for r in realms if is_poe2(r)), realms[0])
-    return g(chosen, "value", "realm_api_id", default="poe2")
-
-
-def resolve_league(base, realm):
-    cache_key = f"league_{re.sub(r'[^a-z0-9]+', '_', realm.lower())}.json"
+def resolve_league():
+    cache_key = f"league_{re.sub(r'[^a-z0-9]+', '_', REALM.lower())}.json"
     cached = cache_read(cache_key)
     if cached:
         return cached
 
-    leagues = http_json(f"{base}/{urllib.parse.quote(realm)}/Leagues")
+    leagues = http_json(f"{BASE}/{urllib.parse.quote(REALM)}/Leagues/")
     if not isinstance(leagues, list) or not leagues:
         raise RuntimeError("Unexpected /Leagues response")
 
     if LEAGUE_OVERRIDE:
+        want = LEAGUE_OVERRIDE.lower()
         league = next(
-            (lg for lg in leagues if str(g(lg, "value", "Value", default="")).lower() == LEAGUE_OVERRIDE.lower()),
-            {"Value": LEAGUE_OVERRIDE},
+            (lg for lg in leagues
+             if want in (str(g(lg, "value", default="")).lower(), str(g(lg, "shortName", default="")).lower())),
+            {"Value": LEAGUE_OVERRIDE, "ShortName": LEAGUE_OVERRIDE},
         )
     else:
         league = next((lg for lg in leagues if g(lg, "isCurrent")), None)
@@ -194,15 +184,13 @@ def resolve_league(base, realm):
                 (lg for lg in leagues if str(g(lg, "value", default="")).lower() not in perm),
                 leagues[0],
             )
-    if not g(league, "value"):
-        raise RuntimeError("Could not determine current league")
     cache_write(cache_key, league)
     return league
 
 
 def league_tokens(league):
-    """Candidate path segments for {LeagueName}; the API uses the short slug
-    (e.g. "runes"), exposed as ShortName, but fall back to Value just in case."""
+    """Candidate {LeagueName} path segments. The API path uses the short slug
+    (e.g. "runes"); try ShortName first, then fall back to Value/id."""
     toks = []
     for k in ("shortName", "value", "leagueId", "id"):
         v = g(league, k)
@@ -227,39 +215,35 @@ def _fetch_pages(url_base, category):
     return items
 
 
-def fetch_category(base, realm, league, category):
-    realm_key = re.sub(r"[^a-z0-9]+", "_", realm.lower())
+def fetch_category(league, category):
+    realm_key = re.sub(r"[^a-z0-9]+", "_", REALM.lower())
     tokens = league_tokens(league)
 
-    # Prefer a previously confirmed league path token.
     saved = cache_read(f"ltoken_{realm_key}.json")
     if saved and saved in tokens:
         tokens = [saved] + [t for t in tokens if t != saved]
 
-    safe = re.sub(r"[^a-z0-9]+", "_", f"{realm}_{tokens[0]}_{category}".lower())
-    cached = cache_read(f"cur_{safe}.json")
+    cache_name = lambda tok: f"cur_{re.sub(r'[^a-z0-9]+', '_', f'{REALM}_{tok}_{category}'.lower())}.json"
+    cached = cache_read(cache_name(tokens[0]))
     if cached is not None:
         return cached
 
     last_err = None
     for tok in tokens:
         url_base = (
-            f"{base}/{urllib.parse.quote(realm)}"
+            f"{BASE}/{urllib.parse.quote(REALM)}"
             f"/Leagues/{urllib.parse.quote(tok)}/Currencies/ByCategory"
         )
         try:
             items = _fetch_pages(url_base, category)
             cache_write(f"ltoken_{realm_key}.json", tok)
-            cache_write(f"cur_{re.sub(r'[^a-z0-9]+', '_', f'{realm}_{tok}_{category}'.lower())}.json", items)
+            cache_write(cache_name(tok), items)
             return items
-        except urllib.error.HTTPError as exc:
+        except ApiError as exc:
             last_err = exc
-            if exc.code == 404:
+            if exc.status == 404:
                 continue  # wrong league token, try the next candidate
             raise
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            continue
     raise last_err or RuntimeError("No working league path token")
 
 
@@ -315,11 +299,9 @@ def main():
         ref_term = parts[1].strip()
 
     try:
-        base, realms = api_context()
-        realm = resolve_realm(realms)
-        league = resolve_league(base, realm)
+        league = resolve_league()
     except Exception as exc:  # noqa: BLE001
-        error_item("Couldn't reach poe2scout API", str(exc)[:240])
+        error_item("Couldn't load the current league", str(exc)[:240])
         return
 
     league_name = g(league, "value", "shortName", default="")
@@ -327,7 +309,7 @@ def main():
     league_divine = to_float(g(league, "divinePrice"))
 
     try:
-        items = fetch_category(base, realm, league, category)
+        items = fetch_category(league, category)
     except Exception as exc:  # noqa: BLE001
         error_item(f"Couldn't load '{category}' prices", str(exc)[:240])
         return
