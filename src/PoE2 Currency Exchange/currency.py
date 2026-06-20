@@ -199,7 +199,49 @@ def league_tokens(league):
     return toks or ["Standard"]
 
 
-def _fetch_pages(url_base, category):
+REALM_KEY = re.sub(r"[^a-z0-9]+", "_", REALM.lower())
+
+
+def league_data(league):
+    """Resolve the working league slug and its currency categories.
+
+    The slug is whichever league_token the API accepts (e.g. "runes"); we probe
+    the Items/Categories endpoint, which doubles as the source of the currency
+    category list. Both are cached so this only hits the network when cold."""
+    saved = cache_read(f"ltoken_{REALM_KEY}.json")
+    if saved:
+        cats = cache_read(f"cats_{REALM_KEY}_{re.sub(r'[^a-z0-9]+', '_', saved.lower())}.json")
+        if cats is not None:
+            return saved, cats
+
+    last_err = None
+    for tok in league_tokens(league):
+        url = f"{BASE}/{urllib.parse.quote(REALM)}/Leagues/{urllib.parse.quote(tok)}/Items/Categories"
+        try:
+            data = http_json(url)
+        except ApiError as exc:
+            last_err = exc
+            if exc.status == 404:
+                continue  # wrong slug, try the next candidate
+            raise
+        cats = [g(c, "apiId") for c in (g(data, "currencyCategories", default=[]) or [])]
+        cats = [c for c in cats if c]
+        cache_write(f"ltoken_{REALM_KEY}.json", tok)
+        cache_write(f"cats_{REALM_KEY}_{re.sub(r'[^a-z0-9]+', '_', tok.lower())}.json", cats)
+        return tok, cats
+    raise last_err or RuntimeError("Could not resolve league path")
+
+
+def fetch_category(token, category):
+    cache_name = f"cur_{re.sub(r'[^a-z0-9]+', '_', f'{REALM}_{token}_{category}'.lower())}.json"
+    cached = cache_read(cache_name)
+    if cached is not None:
+        return cached
+
+    url_base = (
+        f"{BASE}/{urllib.parse.quote(REALM)}"
+        f"/Leagues/{urllib.parse.quote(token)}/Currencies/ByCategory"
+    )
     items, page, max_pages = [], 1, 8
     while page <= max_pages:
         params = {"Category": category, "Page": str(page), "PerPage": "250"}
@@ -212,39 +254,27 @@ def _fetch_pages(url_base, category):
         if page >= pages or not chunk:
             break
         page += 1
+
+    cache_write(cache_name, items)
     return items
 
 
-def fetch_category(league, category):
-    realm_key = re.sub(r"[^a-z0-9]+", "_", REALM.lower())
-    tokens = league_tokens(league)
-
-    saved = cache_read(f"ltoken_{realm_key}.json")
-    if saved and saved in tokens:
-        tokens = [saved] + [t for t in tokens if t != saved]
-
-    cache_name = lambda tok: f"cur_{re.sub(r'[^a-z0-9]+', '_', f'{REALM}_{tok}_{category}'.lower())}.json"
-    cached = cache_read(cache_name(tokens[0]))
-    if cached is not None:
-        return cached
-
-    last_err = None
-    for tok in tokens:
-        url_base = (
-            f"{BASE}/{urllib.parse.quote(REALM)}"
-            f"/Leagues/{urllib.parse.quote(tok)}/Currencies/ByCategory"
-        )
+def gather(token, categories, explicit_category):
+    """Currency items to search over. With an explicit @category, just that one;
+    otherwise merge every currency category so e.g. omens/essences are found."""
+    cats = [explicit_category] if explicit_category else (categories or ["currency"])
+    merged = {}
+    errors = []
+    for cat in cats:
         try:
-            items = _fetch_pages(url_base, category)
-            cache_write(f"ltoken_{realm_key}.json", tok)
-            cache_write(cache_name(tok), items)
-            return items
+            for it in fetch_category(token, cat):
+                key = str(g(it, "currencyItemId", "apiId", default=name_of_item(it)))
+                merged[key] = it
         except ApiError as exc:
-            last_err = exc
-            if exc.status == 404:
-                continue  # wrong league token, try the next candidate
-            raise
-    raise last_err or RuntimeError("No working league path token")
+            errors.append(exc)
+    if not merged and errors:
+        raise errors[0]
+    return list(merged.values())
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +317,14 @@ def find_best(items, term):
 def main():
     raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
 
-    category = DEFAULT_CATEGORY
+    # @category narrows to one category; otherwise search across all currency
+    # categories (or honour a CATEGORY env override).
+    explicit_category = None
     m = re.match(r"^@(\S+)\s*(.*)$", raw)
     if m:
-        category, raw = m.group(1), m.group(2).strip()
+        explicit_category, raw = m.group(1), m.group(2).strip()
+    elif os.environ.get("CATEGORY", "").strip():
+        explicit_category = DEFAULT_CATEGORY
 
     ref_term = None
     parts = re.split(r"\s+in\s+", raw, maxsplit=1)
@@ -300,22 +334,24 @@ def main():
 
     try:
         league = resolve_league()
+        token, categories = league_data(league)
     except Exception as exc:  # noqa: BLE001
-        error_item("Couldn't load the current league", str(exc)[:240])
+        error_item("Couldn't reach poe2scout", str(exc)[:240])
         return
 
     league_name = g(league, "value", "shortName", default="")
     base_label = g(league, "baseCurrencyText", default="Exalted Orb")
     league_divine = to_float(g(league, "divinePrice"))
+    scope = explicit_category or "currencies"
 
     try:
-        items = fetch_category(league, category)
+        items = gather(token, categories, explicit_category)
     except Exception as exc:  # noqa: BLE001
-        error_item(f"Couldn't load '{category}' prices", str(exc)[:240])
+        error_item(f"Couldn't load {scope} prices", str(exc)[:240])
         return
 
     if not items:
-        error_item(f"No items found in category '{category}'", f"League: {league_name}")
+        error_item(f"No {scope} found", f"League: {league_name}")
         return
 
     # Reference currency for conversion (default = base currency).
@@ -343,7 +379,7 @@ def main():
     matched = matched[:25]
 
     if not matched:
-        error_item(f"No match for '{search}'", f"Category: {category} · League: {league_name}")
+        error_item(f"No match for '{search}'", f"Scope: {scope} · League: {league_name}")
         return
 
     ref_short = ref_label.split(" (")[0]
