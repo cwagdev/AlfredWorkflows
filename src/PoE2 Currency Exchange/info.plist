@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>bundleid</key>
+	<string>com.chriswagner.afw.poe2currency</string>
+	<key>category</key>
+	<string>Tools</string>
+	<key>connections</key>
+	<dict>
+		<key>5C2F1A10-0001-4D71-AB6D-POE2SCRIPTF1</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>5C2F1A10-0002-4D71-AB6D-POE2CLIPBD2</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+		</array>
+	</dict>
+	<key>createdby</key>
+	<string>Chris Wagner</string>
+	<key>description</key>
+	<string>Look up PoE2 currency exchange rates for the current league via poe2scout.com</string>
+	<key>disabled</key>
+	<false/>
+	<key>name</key>
+	<string>PoE2 Currency Exchange</string>
+	<key>objects</key>
+	<array>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>alfredfiltersresults</key>
+				<false/>
+				<key>alfredfiltersresultsmatchmode</key>
+				<integer>0</integer>
+				<key>argumenttreatemptyqueryasnil</key>
+				<true/>
+				<key>argumenttrimmode</key>
+				<integer>0</integer>
+				<key>argumenttype</key>
+				<integer>1</integer>
+				<key>escaping</key>
+				<integer>102</integer>
+				<key>keyword</key>
+				<string>poe2</string>
+				<key>queuedelaycustom</key>
+				<integer>3</integer>
+				<key>queuedelayimmediatelyinitially</key>
+				<true/>
+				<key>queuedelaymode</key>
+				<integer>0</integer>
+				<key>queuemode</key>
+				<integer>1</integer>
+				<key>runningsubtext</key>
+				<string>Fetching prices from poe2scout.com…</string>
+				<key>script</key>
+				<string>/usr/bin/python3 currency.py "$1"</string>
+				<key>scriptargtype</key>
+				<integer>0</integer>
+				<key>scriptfile</key>
+				<string></string>
+				<key>subtext</key>
+				<string>Search a currency, or convert with e.g. "mirror in divine"</string>
+				<key>title</key>
+				<string>PoE2 Currency Exchange</string>
+				<key>type</key>
+				<integer>0</integer>
+				<key>withspace</key>
+				<true/>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.input.scriptfilter</string>
+			<key>uid</key>
+			<string>5C2F1A10-0001-4D71-AB6D-POE2SCRIPTF1</string>
+			<key>version</key>
+			<integer>3</integer>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>autopaste</key>
+				<false/>
+				<key>clipboardtext</key>
+				<string>{query}</string>
+				<key>ignoredynamicplaceholders</key>
+				<false/>
+				<key>transient</key>
+				<false/>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.output.clipboard</string>
+			<key>uid</key>
+			<string>5C2F1A10-0002-4D71-AB6D-POE2CLIPBD2</string>
+			<key>version</key>
+			<integer>3</integer>
+		</dict>
+	</array>
+	<key>readme</key>
+	<string>PoE2 Currency Exchange
+======================
+
+Look up Path of Exile 2 currency prices and exchange rates for the current
+league, powered by the public poe2scout.com API.
+
+Usage (keyword: poe2)
+---------------------
+  poe2 divine             Price of Divine Orb (shown in Exalted, plus Divine)
+  poe2 mirror in divine   Mirror of Kalandra priced in Divine Orbs
+  poe2 chaos in exalt     Chaos priced in Exalted
+  poe2 @fragments breach  Search a different category (default is "currency")
+
+Press Return to copy the exchange value to the clipboard.
+Press Cmd+Return to copy the currency name instead.
+
+How it works
+------------
+All poe2scout prices are denominated in the league base currency (Exalted Orb),
+so the rate between any two items A and B is simply price(A) / price(B). The full
+currency list is fetched once and cached for a few minutes, so typing stays
+instant. The current league is detected automatically.
+
+Configuration (Workflow Environment Variables)
+----------------------------------------------
+  LEAGUE     Force a specific league name (default: auto-detect current)
+  CATEGORY   Default item category to search (default: currency)
+  API_BASE   API base URL (default: https://poe2scout.com/api)
+  CACHE_TTL  Seconds to cache price data (default: 600)
+  USER_AGENT Custom User-Agent for API requests
+
+Requires python3 (ships with macOS Command Line Tools).
+Data: https://poe2scout.com  •  API: https://poe2scout.com/api/swagger</string>
+	<key>uidata</key>
+	<dict>
+		<key>5C2F1A10-0001-4D71-AB6D-POE2SCRIPTF1</key>
+		<dict>
+			<key>xpos</key>
+			<real>70</real>
+			<key>ypos</key>
+			<real>70</real>
+		</dict>
+		<key>5C2F1A10-0002-4D71-AB6D-POE2CLIPBD2</key>
+		<dict>
+			<key>xpos</key>
+			<real>360</real>
+			<key>ypos</key>
+			<real>70</real>
+		</dict>
+	</dict>
+	<key>variables</key>
+	<dict>
+		<key>API_BASE</key>
+		<string>https://poe2scout.com/api</string>
+		<key>CACHE_TTL</key>
+		<string>600</string>
+		<key>CATEGORY</key>
+		<string>currency</string>
+		<key>LEAGUE</key>
+		<string></string>
+	</dict>
+	<key>variablesdontexport</key>
+	<array/>
+	<key>version</key>
+	<string>1.0.0</string>
+	<key>webaddress</key>
+	<string>https://poe2scout.com</string>
+</dict>
+</plist>
