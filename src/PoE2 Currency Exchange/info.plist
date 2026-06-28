@@ -131,7 +131,7 @@ Configuration (Workflow Environment Variables)
   REALM      Game realm path segment (default: poe2)
   LEAGUE     Force a specific league name/slug (default: auto-detect current)
   API_BASE   API base URL (default: https://poe2scout.com/api)
-  CACHE_TTL  Seconds to cache price data (default: 600)
+  CACHE_TTL  Seconds to cache price data (default: 1800)
   USER_AGENT Custom User-Agent for API requests
 
 Requires python3 (ships with macOS Command Line Tools).
@@ -158,7 +158,7 @@ Data: https://poe2scout.com  •  API: https://poe2scout.com/api/swagger</string
 		<key>API_BASE</key>
 		<string>https://poe2scout.com/api</string>
 		<key>CACHE_TTL</key>
-		<string>600</string>
+		<string>1800</string>
 		<key>LEAGUE</key>
 		<string></string>
 		<key>REALM</key>

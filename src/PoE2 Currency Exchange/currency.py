@@ -33,7 +33,7 @@ USER_AGENT = os.environ.get(
     "AlfredWorkflow-poe2-currency (https://github.com/cwagdev/AlfredWorkflows)",
 )
 LEAGUE_OVERRIDE = os.environ.get("LEAGUE", "").strip()
-CACHE_TTL = int(os.environ.get("CACHE_TTL", "600"))  # seconds
+CACHE_TTL = int(os.environ.get("CACHE_TTL", "1800"))  # seconds
 HTTP_TIMEOUT = 12
 
 
